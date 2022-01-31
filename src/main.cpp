@@ -1,7 +1,7 @@
-#include "Arduino.h"
 //#include "ESP8266WiFi.h"
-#include "DNSServer.h"
 //#include "ESP8266WebServer.h"
+#include "Arduino.h"
+#include "DNSServer.h"
 #include "WiFiManager.h"
 #include "ESP8266HTTPClient.h"
 #include "WiFiClientSecureBearSSL.h"
@@ -15,7 +15,39 @@ struct Event {
 
 std::vector<Event> eventList;
 
-int prevSize = 0;
+class PrevSize {
+	File file;
+	int size;
+	char *name;
+public:
+	
+	PrevSize() {
+		if (!LittleFS.begin()) {
+			Serial.println("An Error has occurred while mounting LittleFS!");
+			return;
+		}
+		name = (char *) "/lastSize";
+		size = getSize();
+	}
+	
+	int getSize() {
+		int tmp;
+		file = LittleFS.open(name, "r");
+		if (file) tmp = strtol(file.readString().c_str(), nullptr, 10);
+		file.close();
+		return tmp;
+	}
+	
+	void updateSize(int i) {
+		file = LittleFS.open(name, "w");
+		file.print(i);
+		file.close();
+	}
+	
+	void clearSize() {
+		updateSize(99999);
+	}
+};
 
 //	WiFi Setup
 void wifiSetup() {
@@ -75,11 +107,12 @@ time_t parseDT(char *s) {
 	return makeTime(hr, min, sec, day, mn, yr);
 }
 
-bool compEvent(Event a, Event b) {
-	return (a.time < b.time);
-}
-
 void addEvents(char *s) {
+	if (strlen(s) == 0) {
+		Serial.println("No data!");
+		return;
+	}
+	
 	//	Setup timezone
 	waitForSync();
 	Timezone date;
@@ -88,19 +121,17 @@ void addEvents(char *s) {
 	
 	char *pch = strtok(s, "\n");
 	while (pch != nullptr) {
-		if (strstr(pch, "BEGIN:VEVENT")) {
-			eventList.push_back(*new Event);
-		} else if (strstr(pch, "DTSTART")) {
-			eventList.back().time = parseDT(pch);
-		} else if (strstr(pch, "SUMMARY")) {
-			eventList.back().name = strchr(pch, ':') + 1;
-		}
+		if (strstr(pch, "BEGIN:VEVENT")) eventList.push_back(*new Event);
+		else if (strstr(pch, "DTSTART")) eventList.back().time = parseDT(pch);
+		else if (strstr(pch, "SUMMARY")) eventList.back().name = strchr(pch, ':') + 1;
 		
 		pch = strtok(nullptr, "\n");
 	}
 	
 	//	Sort by date
-	std::sort(eventList.begin(), eventList.end(), compEvent);
+	std::sort(eventList.begin(),
+	          eventList.end(),
+	          [](Event a, Event b) { return (a.time < b.time); });
 	
 	for (Event x: eventList)
 		Serial.printf("%s  ~  %s\n", dateTime(x.time).c_str(), x.name);
@@ -109,16 +140,17 @@ void addEvents(char *s) {
 void getTasks() {
 	std::unique_ptr<BearSSL::WiFiClientSecure> client(new BearSSL::WiFiClientSecure);
 	HTTPClient https;
+	PrevSize prev;
 	
-	int lastSize;
-	File file = LittleFS.open("/lastSize", "r");
-	if (file) {
-		lastSize = strtol(file.readString().c_str(), nullptr, 10);
-	}
-	file.close();
+	prev.clearSize();
 	
 	//	TODO Abstract this
 	char url[] = "";
+	
+	if (!strlen(url)) {
+		Serial.println("TickTick URL not set!");
+		return;
+	}
 	
 	client->setSSLVersion(BR_TLS12);
 	client->setInsecure();
@@ -126,22 +158,22 @@ void getTasks() {
 	if (!https.begin(*client, url)) return;
 	
 	Serial.print("[HTTPS] GET...\n");
-	// start connection and send HTTP header
+	//  Start connection and send HTTP header
 	int httpCode = https.GET();
 	if (httpCode != HTTP_CODE_OK) return;
 	
-	// length of content (-1 when the server doesn't send a 'Content-Length' header)
+	//  Length of content (-1 when the server doesn't send a 'Content-Length' header)
 	int len = https.getSize();
 	
-	if (len == lastSize) return;
-	file = LittleFS.open("/lastSize", "w");
-	file.print(len);
-	file.close();
+	//  Same size check. Lazy, but cheap and effective.
+	if (len == prev.getSize()) return;
+	
+	prev.updateSize(len);
 	
 	Serial.printf("Size: %d\n", len);
 	
 	// create buffer for read
-	static uint8_t buff[256] = {0};
+	static char buff[256] = {0};
 	
 	String content = "";
 	
@@ -152,9 +184,9 @@ void getTasks() {
 		
 		if (size) {
 			// read up to 256 byte
-			int c = client->readBytes(buff, ((size > sizeof(buff)) ? sizeof(buff) : size));
-			content.concat((char *) buff);
-			if (len > 0) len -= c;
+			int c = (int) client->readBytes(buff, ((size > sizeof(buff)) ? sizeof(buff) : size));
+			content.concat(buff);
+			if (len) len -= c;
 		}
 		delay(1);
 		memset(buff, 0, 256); // Clear buffer
@@ -164,24 +196,29 @@ void getTasks() {
 	
 	https.end();
 	
-	addEvents((char *) content.c_str());
+	addEvents(const_cast<char *>(content.c_str()));
+}
+
+void clearScreen() {
+	for (int i = 0; i < 100; ++i) {
+		Serial.println();
+	}
+	Serial.write(27);
+	Serial.print("[H");
 }
 
 void setup() {
 	Serial.begin(9600);
 	
-	// Initialize SPIFFS
-	if (!LittleFS.begin()) {
-		Serial.println("An Error has occurred while mounting LittleFS!");
-		return;
-	}
+	clearScreen();
 	
 	wifiSetup();
 	getTasks();
 	
-	Serial.println("Bed time...");
+	Serial.println("\nBed time...\n");
+	
 	EspClass::deepSleep(10e6);
 }
 
-void loop() {
-}
+// Because of deep sleep, setup acts like loop
+void loop() {}

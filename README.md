@@ -2,7 +2,8 @@
 
 ## Setup
 
-Get your TickTick calendar URL from [here](https://www.ticktick.com/webapp/#settings/subscribe)
+1. Get your TickTick calendar URL from [here](https://www.ticktick.com/webapp/#settings/subscribe)
+2. Change `webcal://ticktick.com/***` to `https://ticktick.com/***`
 
 ### Connect to WiFi
 
